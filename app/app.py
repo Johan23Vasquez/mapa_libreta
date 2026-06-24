@@ -1,169 +1,242 @@
-from shiny import App, ui, render
+from shiny import App, ui
+from shinywidgets import render_widget, output_widget
+
 import xarray as xr
-import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
 
-#from app.shared import obtener_utci, mexico
+import ipyleaflet as L
+import numpy as np
+from PIL import Image
+import io
+import base64
+import matplotlib.pyplot as plt
 
 
+
+BASEMAPS = {
+    "OpenStreetMap": L.basemaps.OpenStreetMap.Mapnik,
+    "DarkMatter": L.basemaps.CartoDB.DarkMatter,
+    "Positron": L.basemaps.CartoDB.Positron,
+    "WorldImagery": L.basemaps.Esri.WorldImagery,
+}
+# =========================================================
+# DATA LOAD
+# =========================================================
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 f = BASE_DIR / "data" / "001_raw" / "ECMWF_utci_2023_prueba.nc"
 
 utci = xr.open_dataset(f)
 
 
-def seleccionar_pais(ds, lat1, lat2, lon1, lon2):
+# =========================================================
+# DATA PROCESSING FUNCTIONS
+# =========================================================
 
+def select_country(ds, lat1, lat2, lon1, lon2):
+    """
+    Recorta el dataset a una región geográfica específica.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset original.
+    lat1, lat2 : float
+        Límites de latitud.
+    lon1, lon2 : float
+        Límites de longitud.
+
+    Returns
+    -------
+    xarray.Dataset
+        Subconjunto del dataset.
+    """
     return ds.sel(
         lat=slice(lat1, lat2),
         lon=slice(lon1, lon2)
     )
 
 
-def convertir_a_celsius(ds):
+def to_celsius(ds):
+    """
+    Convierte la variable UTCI de Kelvin a Celsius.
 
+    Parameters
+    ----------
+    ds : xarray.Dataset
+
+    Returns
+    -------
+    xarray.Dataset
+    """
     ds = ds.copy()
-
     ds["utci"] = ds["utci"] - 273.15
-
     ds["utci"].attrs["units"] = "°C"
-
-    return ds
-def convertir_a_hora_local(ds, offset_utc):
-    ds = ds.copy()
-    ds = ds.assign_coords(time=ds.time + pd.Timedelta(hours=offset_utc))
     return ds
 
-mexico = seleccionar_pais(
-    utci,
-    33,
-    14,
-    -118,
-    -86
-)
 
-mexico = convertir_a_celsius(mexico)
-mexico = convertir_a_hora_local(mexico, -6)
+def to_local_time(ds, offset):
+    """
+    Ajusta la coordenada temporal a hora local.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+    offset : int
+        Diferencia horaria respecto a UTC.
+
+    Returns
+    -------
+    xarray.Dataset
+    """
+    return ds.assign_coords(time=ds.time + pd.Timedelta(hours=offset))
 
 
+def get_utci(ds, date, hour):
+    """
+    Extrae el raster UTCI para una fecha y hora específica.
 
-def obtener_utci(ds, fecha, hora):
+    Parameters
+    ----------
+    ds : xarray.Dataset
+    date : str
+        Fecha en formato YYYY-MM-DD
+    hour : int
+        Hora (0-23)
 
-    fecha_hora = f"{fecha}T{hora:02d}:00:00"
-
+    Returns
+    -------
+    numpy.ndarray
+        Matriz 2D de UTCI.
+    """
     return ds.sel(
-        time=fecha_hora,
+        time=f"{date}T{hour:02d}:00:00",
         method="nearest"
     )["utci"].values
 
 
+# =========================================================
+# PREPROCESSING
+# =========================================================
+mexico = select_country(utci, 33, 14, -118, -86)
+mexico = to_celsius(mexico)
+mexico = to_local_time(mexico, -6)
 
 
+# =========================================================
+# RASTER → IMAGE (COLORMAP SCIENTIFIC)
+# =========================================================
+def to_png(data):
+    """
+    Convierte un raster numérico en una imagen PNG con colormap científico.
+
+    - Normaliza valores
+    - Aplica colormap RdYlGn_r
+    - Convierte a imagen RGB
+    - Codifica como base64 para ipyleaflet
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+
+    Returns
+    -------
+    str
+        Imagen en formato data URI (base64 PNG)
+    """
+
+    norm = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
+    norm = np.nan_to_num(norm)
+
+    cmap = plt.get_cmap("RdYlGn_r")
+    colored = cmap(norm)
+
+    rgb = (colored[:, :, :3] * 255).astype(np.uint8)
+
+    img = Image.fromarray(rgb)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    b64 = base64.b64encode(buffer.read()).decode()
+
+    return f"data:image/png;base64,{b64}"
 
 
-app_ui = ui.page_fluid(
+# =========================================================
+# UI
+# =========================================================
+app_ui = ui.page_sidebar(
 
-    ui.h2("Mapa UTCI México"),
+    ui.sidebar(
+        ui.h4("Controls"),
 
-    ui.row(
+        ui.input_date("date", "Select date", value="2023-01-01"),
 
-        ui.column(
-            6,
-
-            ui.input_date(
-                "fecha",
-                "Seleccione una fecha",
-                value="2023-01-01"
-            )
+        ui.input_select(
+            "hour",
+            "Hour (UTC)",
+            {str(h): f"{h:02d}:00" for h in range(24)},
+            selected="18"
         ),
 
-        ui.column(
-            6,
+        ui.input_select(
+            "basemap",
+            "Basemap",
+            list(BASEMAPS.keys()),
+            selected="OpenStreetMap"
+        ),
 
-            ui.input_slider(
-                "hora",
-                "Hora UTC",
-                min=0,
-                max=23,
-                value=18
-            )
-        )
+        bg="#f8f8f8",
+        open="desktop"
     ),
 
-    ui.hr(),
-
-    ui.output_plot("mapa_utci")
+    output_widget("map")
 )
 
-
+# =========================================================
+# SERVER
+# =========================================================
 def server(input, output, session):
 
-    @render.plot
-    def mapa_utci():
+    @render_widget
+    def map():
 
-        fecha = str(input.fecha())
-        hora = input.hora()
+        date = str(input.date())
+        hour = int(input.hour())
+        basemap_name = input.basemap()
 
-        data = obtener_utci(
-            mexico,
-            fecha,
-            hora
+        data = get_utci(mexico, date, hour)
+
+        m = L.Map(
+            center=(23.5, -102.0),
+            zoom=4
         )
 
-        fig, ax = plt.subplots(
-            figsize=(10, 6)
+        # basemap dinámico
+        m.add_layer(
+            L.basemap_to_tiles(BASEMAPS[basemap_name])
         )
 
-        im = ax.imshow(
-            data,
-            extent=[
-                float(mexico.lon.min()),
-                float(mexico.lon.max()),
-                float(mexico.lat.min()),
-                float(mexico.lat.max())
-            ],
-            origin="upper",
-            cmap="RdYlGn_r",
-            vmin=0,
-            vmax=46,
+        # raster overlay
+        img_url = to_png(data)
+
+        bounds = [
+            [float(mexico.lat.min()), float(mexico.lon.min())],
+            [float(mexico.lat.max()), float(mexico.lon.max())]
+        ]
+
+        overlay = L.ImageOverlay(
+            url=img_url,
+            bounds=bounds,
+            opacity=0.6
         )
 
-        ax.set_title(
-            f"UTCI México - {fecha} {hora:02d}:00 UTC"
-        )
+        m.add_layer(overlay)
 
-        ax.set_xlabel("Longitud")
-        ax.set_ylabel("Latitud")
-
-        fig.colorbar(
-            im,
-            ax=ax,
-            label="UTCI (°C)"
-        )
-
-        return fig
-
-
+        return m
+# =========================================================
+# APP
+# =========================================================
 app = App(app_ui, server)
-
-# from matplotlib import pyplot as plt
-# from shiny import App, ui, render
-# from components.paneles import panel_prueba 
-# from app.shared import mexico, obtener_utci
-# from components.server import server   
-
-
-
-
-
-# app_ui = ui.page_fluid(
-# panel_prueba()
-    
-# )
-
-
-
-
-# app = App(app_ui, server)
