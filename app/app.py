@@ -20,9 +20,7 @@ BASEMAPS = {
     "Positron": L.basemaps.CartoDB.Positron,
     "WorldImagery": L.basemaps.Esri.WorldImagery,
 }
-# =========================================================
-# DATA LOAD
-# =========================================================
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 f = BASE_DIR / "data" / "001_raw" / "ECMWF_utci_2023_prueba.nc"
 
@@ -30,8 +28,7 @@ utci = xr.open_dataset(f)
 
 
 # =========================================================
-# DATA PROCESSING FUNCTIONS
-# =========================================================
+
 
 def select_country(ds, lat1, lat2, lon1, lon2):
     """
@@ -116,16 +113,13 @@ def get_utci(ds, date, hour):
 
 
 # =========================================================
-# PREPROCESSING
-# =========================================================
+
 mexico = select_country(utci, 33, 14, -118, -86)
 mexico = to_celsius(mexico)
 mexico = to_local_time(mexico, -6)
 
 
-# =========================================================
-# RASTER → IMAGE (COLORMAP SCIENTIFIC)
-# =========================================================
+
 def to_png(data):
     """
     Convierte un raster numérico en una imagen PNG con colormap científico.
@@ -145,7 +139,11 @@ def to_png(data):
         Imagen en formato data URI (base64 PNG)
     """
 
-    norm = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
+    vmin = 0
+    vmax = 46
+
+    norm = (data - vmin) / (vmax - vmin)
+    norm = np.clip(norm, 0, 1)
     norm = np.nan_to_num(norm)
 
     cmap = plt.get_cmap("RdYlGn_r")
@@ -165,8 +163,7 @@ def to_png(data):
 
 
 # =========================================================
-# UI
-# =========================================================
+
 app_ui = ui.page_sidebar(
 
     ui.sidebar(
