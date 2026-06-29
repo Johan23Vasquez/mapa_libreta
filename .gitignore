@@ -9,4 +9,4 @@ wheels/
 # Virtual environments
 .venv
 
-data\001_raw\ECMWF_utci_2023_prueba.nc
+data/001_raw/

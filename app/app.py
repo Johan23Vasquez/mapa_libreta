@@ -1,17 +1,16 @@
-from shiny import App, ui
+from shiny import App, ui, reactive
 from shinywidgets import render_widget, output_widget
-
 import xarray as xr
 import pandas as pd
 from pathlib import Path
-
 import ipyleaflet as L
 import numpy as np
 from PIL import Image
 import io
 import base64
 import matplotlib.pyplot as plt
-
+import geopandas as gpd
+import json
 
 
 BASEMAPS = {
@@ -22,50 +21,21 @@ BASEMAPS = {
 }
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-f = BASE_DIR / "data" / "001_raw" / "ECMWF_utci_2023_prueba.nc"
+f = BASE_DIR / "data" / "001_raw" / "ECMWF_utci_2023_mexico_anual.nc"
 
 utci = xr.open_dataset(f)
 
+shp = gpd.read_file(BASE_DIR / "data" / "001_raw" / "INEGI" / "00ent.shp")
+shp = shp.to_crs(epsg=4326)
 
-# =========================================================
+geojson_data = json.loads(shp.to_json())
 
 
 def select_country(ds, lat1, lat2, lon1, lon2):
-    """
-    Recorta el dataset a una región geográfica específica.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset original.
-    lat1, lat2 : float
-        Límites de latitud.
-    lon1, lon2 : float
-        Límites de longitud.
-
-    Returns
-    -------
-    xarray.Dataset
-        Subconjunto del dataset.
-    """
-    return ds.sel(
-        lat=slice(lat1, lat2),
-        lon=slice(lon1, lon2)
-    )
+    return ds.sel(lat=slice(lat1, lat2), lon=slice(lon1, lon2))
 
 
 def to_celsius(ds):
-    """
-    Convierte la variable UTCI de Kelvin a Celsius.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-
-    Returns
-    -------
-    xarray.Dataset
-    """
     ds = ds.copy()
     ds["utci"] = ds["utci"] - 273.15
     ds["utci"].attrs["units"] = "°C"
@@ -73,74 +43,20 @@ def to_celsius(ds):
 
 
 def to_local_time(ds, offset):
-    """
-    Ajusta la coordenada temporal a hora local.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-    offset : int
-        Diferencia horaria respecto a UTC.
-
-    Returns
-    -------
-    xarray.Dataset
-    """
     return ds.assign_coords(time=ds.time + pd.Timedelta(hours=offset))
 
 
 def get_utci(ds, date, hour):
-    """
-    Extrae el raster UTCI para una fecha y hora específica.
+    return ds.sel(time=f"{date}T{hour:02d}:00:00", method="nearest")["utci"].values
 
-    Parameters
-    ----------
-    ds : xarray.Dataset
-    date : str
-        Fecha en formato YYYY-MM-DD
-    hour : int
-        Hora (0-23)
-
-    Returns
-    -------
-    numpy.ndarray
-        Matriz 2D de UTCI.
-    """
-    return ds.sel(
-        time=f"{date}T{hour:02d}:00:00",
-        method="nearest"
-    )["utci"].values
-
-
-# =========================================================
 
 mexico = select_country(utci, 33, 14, -118, -86)
 mexico = to_celsius(mexico)
 mexico = to_local_time(mexico, -6)
 
 
-
-def to_png(data):
-    """
-    Convierte un raster numérico en una imagen PNG con colormap científico.
-
-    - Normaliza valores
-    - Aplica colormap RdYlGn_r
-    - Convierte a imagen RGB
-    - Codifica como base64 para ipyleaflet
-
-    Parameters
-    ----------
-    data : numpy.ndarray
-
-    Returns
-    -------
-    str
-        Imagen en formato data URI (base64 PNG)
-    """
-
-    vmin = 0
-    vmax = 46
+def to_png(data, mode="smooth"):
+    vmin, vmax = 0, 46
 
     norm = (data - vmin) / (vmax - vmin)
     norm = np.clip(norm, 0, 1)
@@ -150,90 +66,71 @@ def to_png(data):
     colored = cmap(norm)
 
     rgb = (colored[:, :, :3] * 255).astype(np.uint8)
-
     img = Image.fromarray(rgb)
+
+    if mode == "pixel":
+        img = img.resize((img.width * 8, img.height * 8), Image.Resampling.NEAREST)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     buffer.seek(0)
 
-    b64 = base64.b64encode(buffer.read()).decode()
-
-    return f"data:image/png;base64,{b64}"
+    return "data:image/png;base64," + base64.b64encode(buffer.read()).decode()
 
 
-# =========================================================
+
+
 
 app_ui = ui.page_sidebar(
-
     ui.sidebar(
-        ui.h4("Controls"),
-
         ui.input_date("date", "Select date", value="2023-01-01"),
-
-        ui.input_select(
-            "hour",
-            "Hour (UTC)",
-            {str(h): f"{h:02d}:00" for h in range(24)},
-            selected="18"
-        ),
-
-        ui.input_select(
-            "basemap",
-            "Basemap",
-            list(BASEMAPS.keys()),
-            selected="OpenStreetMap"
-        ),
-
-        bg="#f8f8f8",
+        ui.input_select("hour", "Hour (UTC)", {str(h): f"{h:02d}:00" for h in range(24)}, selected="18"),
+        ui.input_select("basemap", "Basemap", list(BASEMAPS.keys())),
+        ui.input_select("render_mode", "Visual mode", {"smooth": "Smooth", "pixel": "Pixel"}),
+        ui.input_checkbox("show_shapefile", "Show INEGI borders", False),
         open="desktop"
     ),
-
-    output_widget("map")
+    output_widget("map", height="600px")
 )
 
-# =========================================================
-# SERVER
-# =========================================================
 def server(input, output, session):
 
     @render_widget
     def map():
+        m = L.Map(center=(23.5, -102.0), zoom=4, layout={"height": "600px"})
+        return m
 
+    @reactive.effect
+    def update_layers():
+        widget = map.widget
+        if widget is None:
+            return
+
+        widget.layers = ()
+
+        basemap = input.basemap()
+        mode = input.render_mode()
         date = str(input.date())
         hour = int(input.hour())
-        basemap_name = input.basemap()
 
         data = get_utci(mexico, date, hour)
 
-        m = L.Map(
-            center=(23.5, -102.0),
-            zoom=4
-        )
-
-        # basemap dinámico
-        m.add_layer(
-            L.basemap_to_tiles(BASEMAPS[basemap_name])
-        )
-
-        # raster overlay
-        img_url = to_png(data)
+        img_url = to_png(data, mode)
 
         bounds = [
             [float(mexico.lat.min()), float(mexico.lon.min())],
             [float(mexico.lat.max()), float(mexico.lon.max())]
         ]
 
-        overlay = L.ImageOverlay(
-            url=img_url,
-            bounds=bounds,
-            opacity=0.6
-        )
+        widget.add_layer(L.basemap_to_tiles(BASEMAPS[basemap]))
+        widget.add_layer(L.ImageOverlay(url=img_url, bounds=bounds, opacity=0.6))
 
-        m.add_layer(overlay)
+        if input.show_shapefile():
+            widget.add_layer(
+                L.GeoJSON(
+                    data=geojson_data,
+                    style={"color": "red", "weight": 2, "fillOpacity": 0}
+                )
+            )
 
-        return m
-# =========================================================
-# APP
-# =========================================================
 app = App(app_ui, server)
