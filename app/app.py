@@ -157,6 +157,16 @@ app_ui = ui.page_sidebar(
         ui.input_select("basemap", "Basemap", list(BASEMAPS.keys())),
         ui.input_select("render_mode", "Visual mode", {"smooth": "Smooth", "pixel": "Pixel"}),
         ui.input_checkbox("show_shapefile", "Show INEGI borders", False),
+        ui.div(
+    ui.div("UTCI (°C)", style="font-size:12px; margin-bottom:4px; font-weight:bold;"),
+    ui.div(
+        ui.span("0", style="font-size:11px;"),
+        ui.div(style="width:150px; height:16px; border-radius:4px; background: linear-gradient(to right, #1a9850, #ffffbf, #d73027);"),
+        ui.span("46", style="font-size:11px;"),
+        style="display:flex; align-items:center; gap:6px;"
+    ),
+    style="margin-top:8px;"
+),
         open="desktop"
     ),
     output_widget("map", height="600px")
