@@ -11,6 +11,7 @@ import base64
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import json
+import rioxarray
 
 
 BASEMAPS = {
@@ -103,9 +104,18 @@ def load_year(year):
     f = BASE_DIR / "data" / "001_raw" / f"ECMWF_utci_{year}_mexico_anual.nc"
 
     ds = xr.open_dataset(f)
-    ds = select_country(ds, 33, 14, -118, -86)
+
+    ds = select_country(ds)
     ds = to_celsius(ds)
     ds = to_local_time(ds, -6)
+
+    ds = ds.rio.write_crs("EPSG:4326")
+
+    ds = ds.rio.clip(
+        shp.geometry,
+        shp.crs,
+        drop=False
+    )
 
     return ds
 
@@ -136,7 +146,13 @@ def to_png(data, mode="smooth"):
 
     rgb = (colored[:, :, :3] * 255).astype(np.uint8)
     img = Image.fromarray(rgb)
+    colored = cmap(norm)
 
+    rgba = (colored * 255).astype(np.uint8)
+
+    rgba[np.isnan(data), 3] = 0
+
+    img = Image.fromarray(rgba)
     if mode == "pixel":
         img = img.resize((img.width * 8, img.height * 8), Image.Resampling.NEAREST)
 
